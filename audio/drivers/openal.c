@@ -28,6 +28,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <AL/xram.h>
 #endif
 
 #include <retro_miscellaneous.h>
@@ -36,7 +37,13 @@
 #include "../audio_driver.h"
 #include "../../verbosity.h"
 
+// 1024 bytes, 512 samples, 256 frames
+// Each buffer should be ~5 ms at 48 kHz
 #define BUFSIZE 1024
+
+// to workaround X-Fi bug
+struct timespec first, second;
+long elapsedTime;
 
 typedef struct al
 {
@@ -47,6 +54,7 @@ typedef struct al
    ALenum format;
    size_t num_buffers;
    int rate;
+   unsigned int latency;
 
    uint8_t tmpbuf[BUFSIZE];
    size_t tmpbuf_ptr;
@@ -66,6 +74,7 @@ static void al_free(void *data)
       return;
 
    alSourceStop(al->source);
+   alSourcei(al->source, AL_BUFFER, 0);
    alDeleteSources(1, &al->source);
 
    if (al->buffers)
@@ -106,11 +115,14 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
 
    al->rate = rate;
 
+   al->latency = latency;
+
    /* We already use one buffer for tmpbuf. */
    al->num_buffers = (latency * rate * 2 * sizeof(int16_t)) / (1000 * BUFSIZE) - 1;
    if (al->num_buffers < 2)
       al->num_buffers = 2;
 
+   RARCH_LOG("[OpenAL]: Renderer: %s.\n", alGetString(AL_RENDERER));
    RARCH_LOG("[OpenAL]: Using %u buffers of %u bytes.\n", (unsigned)al->num_buffers, BUFSIZE);
 
    al->buffers = (ALuint*)calloc(al->num_buffers, sizeof(ALuint));
@@ -120,6 +132,13 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
 
    alGenSources(1, &al->source);
    alGenBuffers(al->num_buffers, al->buffers);
+
+   if (alIsExtensionPresent("EAX-RAM") == true)
+   {
+      EAXSetBufferMode eaxSetBufferMode;
+      eaxSetBufferMode = (EAXSetBufferMode)alGetProcAddress("EAXSetBufferMode");
+      eaxSetBufferMode(al->num_buffers, al->buffers, alGetEnumValue("AL_STORAGE_ACCESSIBLE"));
+   }
 
    memcpy(al->res_buf, al->buffers, al->num_buffers * sizeof(ALuint));
    al->res_ptr = al->num_buffers;
@@ -136,10 +155,21 @@ static bool al_unqueue_buffers(al_t *al)
    ALint val;
 
    alGetSourcei(al->source, AL_BUFFERS_PROCESSED, &val);
+   clock_gettime(CLOCK_MONOTONIC, &first);
+
+   elapsedTime = (first.tv_sec  - second.tv_sec) * 1000 + (first.tv_nsec - second.tv_nsec) / 1000000;
+   if (elapsedTime > al->latency && val == 0)
+   {
+      RARCH_LOG("Time stuck: %ld ms\n", elapsedTime);
+      // workaround X-Fi bug
+      alSourcePause(al->source);
+      alSourcePlay(al->source);
+   }
 
    if (val <= 0)
       return false;
 
+   clock_gettime(CLOCK_MONOTONIC, &second);
    alSourceUnqueueBuffers(al->source, val, &al->res_buf[al->res_ptr]);
    al->res_ptr += val;
    return true;
