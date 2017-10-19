@@ -162,7 +162,6 @@ static bool al_unqueue_buffers(al_t *al)
    {
       RARCH_LOG("Time stuck: %ld ms\n", elapsedTime);
       // workaround X-Fi bug
-      alSourcePause(al->source);
       alSourcePlay(al->source);
    }
 
